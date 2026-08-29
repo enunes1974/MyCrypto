@@ -113,6 +113,8 @@ main{max-width:1320px;margin:0 auto;padding:24px;}
 
 .charts-row{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:16px;margin-bottom:20px;}
 @media(max-width:900px){.charts-row{grid-template-columns:1fr;}}
+.two-col-panel{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+@media(max-width:700px){.two-col-panel{grid-template-columns:1fr;}}
 .chart-box{position:relative;height:230px;}
 .chart-box.tall{height:280px;}
 
@@ -177,7 +179,14 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
 
 <header class="app-header">
   <div class="brand">
-    <div class="coin">₿</div>
+    <div class="coin">
+      <svg width="60%" height="60%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9 3.5V2M9 3.5V5.5M9 18.5V20.5M9 18.5V22M13 3.5V2M13 3.5V5.5M13 18.5V20.5M13 18.5V22" stroke="#0D1121" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M6.5 5.5H13.2C15 5.5 16.3 6.6 16.3 8.3C16.3 9.9 15.1 11 13.5 11.2V11.3C15.4 11.4 16.9 12.6 16.9 14.4C16.9 16.3 15.4 17.5 13.3 17.5H6.5V5.5Z" stroke="#0D1121" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M8.7 5.5V17.5" stroke="#0D1121" stroke-width="1.6"/>
+        <path d="M8.7 11.2H13.5" stroke="#0D1121" stroke-width="1.6"/>
+      </svg>
+    </div>
     <div>
       <h1 class="display">My Crypto</h1>
       <div class="sub">Portefólio pessoal</div>
@@ -211,7 +220,7 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
 
     <div class="charts-row">
       <div class="panel">
-        <h2>Evolução do Portefólio <span class="actions"><button class="small-btn" id="trendReload">Atualizar gráfico</button></span></h2>
+        <h2>Evolução do Portefólio <span class="actions"><button class="small-btn" id="trendReload">Registar ponto agora</button></span></h2>
         <div class="chart-box tall"><canvas id="trendChart"></canvas></div>
       </div>
       <div class="panel">
@@ -224,9 +233,15 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
       </div>
     </div>
 
-    <div class="panel">
-      <h2>Dominância de Mercado (Global) <span class="actions"><span class="sub" id="domUpdated" style="color:var(--muted);font-size:11px;"></span></span></h2>
-      <div class="chart-box"><canvas id="domChart"></canvas></div>
+    <div class="panel two-col-panel">
+      <div>
+        <h2>Dominância do Meu Portefólio</h2>
+        <div class="chart-box"><canvas id="myDomChart"></canvas></div>
+      </div>
+      <div>
+        <h2>Dominância de Mercado (Global) <span class="actions"><span class="sub" id="domUpdated" style="color:var(--muted);font-size:11px;"></span></span></h2>
+        <div class="chart-box"><canvas id="domChart"></canvas></div>
+      </div>
     </div>
 
     <div class="panel">
@@ -390,7 +405,7 @@ function defaultState(){
     transactions,
     fiatBalances:{w_binance:0, w_bitstamp:0, w_bit2me:0, w_bybit:0},
     settings:{hideValues:false},
-    cache:{prices:{}, market:{}, top50:null, top50Updated:null, dominance:null, dominanceUpdated:null, trend:null, lastUpdate:null},
+    cache:{prices:{}, market:{}, top50:null, top50Updated:null, dominance:null, dominanceUpdated:null, snapshots:[], lastUpdate:null},
   };
 }
 function tx(type,walletId,coinId,qty,price,date,notes){
@@ -523,31 +538,24 @@ async function fetchDominance(){
   }catch(e){ console.error(e); }
 }
 
-async function fetchTrend(days=180){
-  const pos = computeHoldings();
-  const agg = aggregateByCoin(pos);
-  const coinIds = Object.keys(agg);
-  if(coinIds.length===0) return;
-  showToast('A carregar histórico de preços…');
-  const series = {}; // date -> total value
-  for(const id of coinIds){
-    try{
-      const res = await fetch(`${CG}/coins/${id}/market_chart?vs_currency=eur&days=${days}&interval=daily&_ts=${Date.now()}`, {cache:'no-store'});
-      if(!res.ok) continue;
-      const data = await res.json();
-      const qty = agg[id].qty;
-      (data.prices||[]).forEach(([ts,price])=>{
-        const day = new Date(ts).toISOString().slice(0,10);
-        series[day] = (series[day]||0) + price*qty;
-      });
-    }catch(e){ console.error('trend fetch fail', id, e); }
-  }
-  const labels = Object.keys(series).sort();
-  const values = labels.map(l=>series[l]);
-  state.cache.trend = {labels, values, updated:new Date().toISOString()};
+/* ============ HISTÓRICO REAL DO PORTEFÓLIO ============ */
+// Em vez de tentar reconstruir o passado com preços históricos da CoinGecko
+// (o que nunca bate certo com precisão, por causa de granularidade e moedas
+// sem histórico completo), guardamos o valor real do portefólio calculado
+// a cada atualização. Um ponto por dia (o mais recente desse dia).
+const TREND_START_DATE = '2026-08-01';
+
+function recordSnapshot(totalValue){
+  if(totalValue==null || isNaN(totalValue)) return;
+  if(!state.cache.snapshots) state.cache.snapshots = [];
+  const today = new Date().toISOString().slice(0,10);
+  const list = state.cache.snapshots.filter(s=>s.date!==today);
+  list.push({date:today, value:totalValue});
+  list.sort((a,b)=> a.date<b.date?-1:1);
+  state.cache.snapshots = list;
   saveState();
-  renderTrendChart();
 }
+
 
 /* ============ FORMATAÇÃO ============ */
 function fmtEUR(v){
@@ -586,7 +594,7 @@ function renderTicker(){
 }
 
 /* ============ RENDER: DASHBOARD ============ */
-let coinPieChart, walletPieChart, domChartObj, trendChartObj;
+let coinPieChart, walletPieChart, domChartObj, myDomChartObj, trendChartObj;
 
 function renderDashboard(){
   const pos = computeHoldings();
@@ -594,6 +602,7 @@ function renderDashboard(){
 
   let totalInvest=0, totalValue=0;
   const byCoin = {};
+  const byCoinValue = {};
   const byWallet = {};
 
   rows.forEach(p=>{
@@ -603,6 +612,7 @@ function renderDashboard(){
     totalInvest += p.costBasis;
     if(value!=null) totalValue += value;
     byCoin[p.coinId] = (byCoin[p.coinId]||0) + p.costBasis;
+    byCoinValue[p.coinId] = (byCoinValue[p.coinId]||0) + (value!=null?value:0);
     byWallet[p.walletId] = (byWallet[p.walletId]||0) + (value!=null?value:p.costBasis);
   });
   // fiat balances add straight to value & investment (1:1)
@@ -627,8 +637,13 @@ function renderDashboard(){
   renderHoldingsTable(rows);
   renderCoinPie(byCoin, hide);
   renderWalletPie(byWallet, hide);
+  renderMyDominance(byCoinValue);
   renderDominance();
   renderTicker();
+  if(rows.every(p=>state.cache.prices[p.coinId]!=null)){
+    recordSnapshot(totalValue);
+    renderTrendChart();
+  }
 }
 
 function renderHoldingsTable(rows){
@@ -694,6 +709,26 @@ function renderWalletPie(byWallet, hide){
       cutout:'62%', maintainAspectRatio:false}
   });
 }
+function renderMyDominance(byCoinValue){
+  const ctx = document.getElementById('myDomChart');
+  if(myDomChartObj) myDomChartObj.destroy();
+  const entries = Object.entries(byCoinValue).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+  if(entries.length===0) return;
+  const total = entries.reduce((s,e)=>s+e[1],0);
+  const labels = entries.map(e=>coinSymbol(e[0]));
+  const values = entries.map(e=> total>0 ? (e[1]/total*100) : 0);
+  myDomChartObj = new Chart(ctx,{
+    type:'pie',
+    data:{labels, datasets:[{data:values, backgroundColor:PALETTE, borderWidth:0}]},
+    options:{
+      plugins:{
+        legend:{position:'bottom', labels:{color:'#8891AA', boxWidth:10, font:{size:11}}},
+        tooltip:{callbacks:{label:(ctx)=> `${ctx.label}: ${ctx.parsed.toFixed(2)}%`}}
+      },
+      maintainAspectRatio:false
+    }
+  });
+}
 function renderDominance(){
   const d = state.cache.dominance;
   const box = document.getElementById('domUpdated');
@@ -715,23 +750,34 @@ function renderDominance(){
 function renderTrendChart(){
   const ctx = document.getElementById('trendChart');
   if(trendChartObj) trendChartObj.destroy();
-  const t = state.cache.trend;
-  if(!t || !t.labels || t.labels.length===0){
+  const snaps = (state.cache.snapshots||[]).filter(s=>s.date>=TREND_START_DATE);
+  if(snaps.length===0){
     return;
   }
+  const labels = snaps.map(s=>s.date);
+  const values = snaps.map(s=>s.value);
   trendChartObj = new Chart(ctx,{
     type:'line',
-    data:{labels:t.labels, datasets:[{
-      label:'Valor do Portefólio', data:t.values, borderColor:'#F0B03C', backgroundColor:'rgba(240,176,60,0.12)',
-      fill:true, tension:0.25, pointRadius:0, borderWidth:2,
+    data:{labels, datasets:[{
+      label:'Valor do Portefólio', data:values, borderColor:'#F0B03C', backgroundColor:'rgba(240,176,60,0.12)',
+      fill:true, tension:0.25, pointRadius: snaps.length<=15?3:0, borderWidth:2,
     }]},
     options:{
       maintainAspectRatio:false,
       scales:{
         x:{ticks:{color:'#8891AA', maxTicksLimit:8, font:{size:10}}, grid:{color:'rgba(255,255,255,0.04)'}},
-        y:{ticks:{color:'#8891AA', font:{size:10}}, grid:{color:'rgba(255,255,255,0.04)'}}
+        y:{
+          ticks:{
+            color:'#8891AA', font:{size:10},
+            callback:(v)=> v.toLocaleString('pt-PT',{style:'currency',currency:'EUR',maximumFractionDigits:0})
+          },
+          grid:{color:'rgba(255,255,255,0.04)'}
+        }
       },
-      plugins:{legend:{display:false}}
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{label:(ctx)=> fmtEUR(ctx.parsed.y)}}
+      }
     }
   });
 }
@@ -943,14 +989,34 @@ document.getElementById('refreshBtn').addEventListener('click', async ()=>{
   await refreshAll();
   showToast('Cotações atualizadas.');
 });
-document.getElementById('trendReload').addEventListener('click', ()=> fetchTrend(180));
+document.getElementById('trendReload').addEventListener('click', ()=> refreshAll());
 
 /* Backup */
-document.getElementById('exportBtn').addEventListener('click', ()=>{
-  const blob = new Blob([JSON.stringify(state,null,2)], {type:'application/json'});
+document.getElementById('exportBtn').addEventListener('click', async ()=>{
+  const filename = `mycrypto-backup-${new Date().toISOString().slice(0,10)}.json`;
+  const content = JSON.stringify(state,null,2);
+  // Chrome/Edge desktop: permite escolher a pasta/nome do ficheiro
+  if(window.showSaveFilePicker){
+    try{
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{description:'Backup JSON', accept:{'application/json':['.json']}}]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(content);
+      await writable.close();
+      showToast('Backup guardado.');
+      return;
+    }catch(err){
+      if(err && err.name === 'AbortError') return; // utilizador cancelou
+      console.error(err); // segue para o fallback abaixo
+    }
+  }
+  // Fallback (Safari/iOS ou navegadores sem File System Access API): download normal
+  const blob = new Blob([content], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = `mycrypto-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.href = url; a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
 });
@@ -990,10 +1056,7 @@ function renderAll(){
 }
 
 renderAll();
-refreshAll().then(()=>{
-  if(!state.cache.trend) fetchTrend(180);
-  else renderTrendChart();
-});
+refreshAll();
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
