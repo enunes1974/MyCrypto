@@ -1,7 +1,7 @@
 {
-  "name": "My Crypto",
-  "short_name": "MyCrypto",
-  "description": "Painel pessoal de portefólio de criptomoedas",
+  "name": "My Portefolio",
+  "short_name": "MyPortefolio",
+  "description": "Painel pessoal de investimentos — criptomoedas, ações, ETFs e outros ativos",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

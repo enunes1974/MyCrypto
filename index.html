@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>My Crypto</title>
+<title>My Portefolio</title>
 <meta name="theme-color" content="#0D1121" />
 <link rel="manifest" href="manifest.json" />
 <link rel="apple-touch-icon" href="icon-192.png" />
@@ -188,8 +188,8 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
       </svg>
     </div>
     <div>
-      <h1 class="display">My Crypto</h1>
-      <div class="sub">Portefólio pessoal</div>
+      <h1 class="display">My Portefolio</h1>
+      <div class="sub">Cripto · Ações · ETFs</div>
     </div>
   </div>
   <nav class="tabs">
@@ -224,7 +224,7 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
         <div class="chart-box tall"><canvas id="trendChart"></canvas></div>
       </div>
       <div class="panel">
-        <h2>Investimento por Moeda</h2>
+        <h2>Investimento por Ativo</h2>
         <div class="chart-box"><canvas id="coinPie"></canvas></div>
       </div>
       <div class="panel">
@@ -245,7 +245,12 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
     </div>
 
     <div class="panel">
-      <h2>Posições</h2>
+      <h2>Posição Total por Ativo <span class="actions"><span class="sub" style="color:var(--muted);font-size:11px;">soma entre todas as carteiras</span></span></h2>
+      <div id="aggregateTableWrap"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Posições por Carteira</h2>
       <div id="holdingsTableWrap"></div>
     </div>
   </div>
@@ -285,8 +290,19 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
       <button data-type="sell">Venda</button>
       <button data-type="transfer">Transferência</button>
     </div>
+
     <div class="field">
-      <label>Moeda</label>
+      <label>Classe do Ativo</label>
+      <div class="type-toggle" id="txClassToggle">
+        <button data-class="crypto" class="active">Cripto</button>
+        <button data-class="stock">Ação</button>
+        <button data-class="etf">ETF</button>
+        <button data-class="other">Outro</button>
+      </div>
+    </div>
+
+    <div class="field" id="txCoinWrap">
+      <label id="txAssetLabel">Moeda</label>
       <select id="txCoin"></select>
     </div>
     <div class="field" id="txCoinCustomWrap" style="display:none;">
@@ -298,6 +314,17 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
       <div id="txCoinSearchResults" style="margin-top:6px;font-size:12.5px;"></div>
     </div>
     <a href="#" id="showCoinSearch" style="font-size:11.5px;color:var(--gold-2);text-decoration:none;">+ moeda não está na lista?</a>
+
+    <div id="txNewAssetWrap" style="display:none;">
+      <div class="field">
+        <label>Símbolo (ex: AAPL, VWCE)</label>
+        <input type="text" id="txNewAssetSymbol" placeholder="ex: AAPL">
+      </div>
+      <div class="field">
+        <label>Nome do ativo</label>
+        <input type="text" id="txNewAssetName" placeholder="ex: Apple Inc.">
+      </div>
+    </div>
 
     <div class="field" style="margin-top:12px;">
       <label id="txWalletLabel">Carteira</label>
@@ -345,7 +372,8 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
     <div class="field">
       <label>Tipo</label>
       <select id="walletType">
-        <option value="exchange">Exchange</option>
+        <option value="exchange">Exchange (cripto)</option>
+        <option value="broker">Corretora (ações/ETFs)</option>
         <option value="hardware">Hardware Wallet</option>
         <option value="wallet">Wallet Software</option>
         <option value="bank">Conta Bancária (FIAT)</option>
@@ -404,6 +432,7 @@ function defaultState(){
     wallets,
     transactions,
     fiatBalances:{w_binance:0, w_bitstamp:0, w_bit2me:0, w_bybit:0},
+    securities:{},
     settings:{hideValues:false},
     cache:{prices:{}, market:{}, top50:null, top50Updated:null, dominance:null, dominanceUpdated:null, snapshots:[], lastUpdate:null},
   };
@@ -416,11 +445,22 @@ let state = loadState();
 function loadState(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return defaultState();
+    if(!raw) return migrateState(defaultState());
     const parsed = JSON.parse(raw);
-    if(!parsed.wallets) return defaultState();
-    return parsed;
-  }catch(e){ return defaultState(); }
+    if(!parsed.wallets) return migrateState(defaultState());
+    return migrateState(parsed);
+  }catch(e){ return migrateState(defaultState()); }
+}
+// Preenche campos novos em estado guardado por versões anteriores da app,
+// sem apagar nada do que já lá está.
+function migrateState(s){
+  if(!s.securities) s.securities = {};
+  if(!s.cache) s.cache = {};
+  if(!s.cache.snapshots) s.cache.snapshots = [];
+  if(!s.wallets.some(w=>w.name.toUpperCase()==='XTB')){
+    s.wallets.push({id:'w_xtb', name:'XTB', type:'broker'});
+  }
+  return s;
 }
 function saveState(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -570,8 +610,20 @@ function fmtPct(v){
   if(v===undefined||v===null||isNaN(v)) return '—';
   return (v>=0?'+':'')+v.toLocaleString('pt-PT',{maximumFractionDigits:2})+'%';
 }
-function coinName(id){ return COIN_CATALOG[id] ? COIN_CATALOG[id].name : id; }
-function coinSymbol(id){ return COIN_CATALOG[id] ? COIN_CATALOG[id].symbol : id.toUpperCase(); }
+function isCrypto(id){ return !!COIN_CATALOG[id]; }
+function assetInfo(id){
+  if(COIN_CATALOG[id]) return COIN_CATALOG[id];
+  if(state.securities && state.securities[id]) return state.securities[id];
+  return {symbol:id.toUpperCase(), name:id};
+}
+function coinName(id){ return assetInfo(id).name; }
+function coinSymbol(id){ return assetInfo(id).symbol; }
+function assetClassLabel(id){
+  if(isCrypto(id)) return 'Cripto';
+  const s = state.securities && state.securities[id];
+  if(!s) return '—';
+  return s.class==='stock'?'Ação':s.class==='etf'?'ETF':'Outro';
+}
 function walletName(id){ const w = state.wallets.find(w=>w.id===id); return w?w.name:'—'; }
 function showToast(msg){
   const t = document.getElementById('toast');
@@ -635,12 +687,13 @@ function renderDashboard(){
   roiEl.innerHTML = `<span class="${hc}">${fmtPct(roi)}</span>`;
 
   renderHoldingsTable(rows);
+  renderAggregateTable();
   renderCoinPie(byCoin, hide);
   renderWalletPie(byWallet, hide);
   renderMyDominance(byCoinValue);
   renderDominance();
   renderTicker();
-  if(rows.every(p=>state.cache.prices[p.coinId]!=null)){
+  if(rows.every(p=>state.cache.prices[p.coinId] && state.cache.prices[p.coinId].price!=null)){
     recordSnapshot(totalValue);
     renderTrendChart();
   }
@@ -654,7 +707,7 @@ function renderHoldingsTable(rows){
     return;
   }
   let html = `<table><thead><tr>
-    <th>Carteira</th><th>Moeda</th><th class="num">Qtd</th><th class="num">Preço Médio</th>
+    <th>Carteira</th><th>Ativo</th><th class="num">Qtd</th><th class="num">Preço Médio</th>
     <th class="num">Preço Atual</th><th class="num">Valor Atual</th><th class="num">Lucro/Prej.</th><th class="num">ROI</th><th class="num">ATH</th>
   </tr></thead><tbody>`;
   rows.sort((a,b)=> (b.qty*(state.cache.prices[b.coinId]?.price||0)) - (a.qty*(state.cache.prices[a.coinId]?.price||0)) );
@@ -665,12 +718,16 @@ function renderHoldingsTable(rows){
     const pl = value!=null? value-p.costBasis : null;
     const roi = p.costBasis>0 && pl!=null ? (pl/p.costBasis*100) : null;
     const ath = pr?pr.ath:null;
+    const manual = !isCrypto(p.coinId);
+    const priceCell = manual
+      ? `<span class="small-btn" style="cursor:pointer;" onclick="editManualPrice('${p.coinId}')" title="Clicar para atualizar o preço manualmente">${currentPrice!=null?fmtEUR(currentPrice):'definir'} ✎</span>`
+      : (currentPrice!=null?fmtEUR(currentPrice):'—');
     html += `<tr>
       <td><span class="wallet-badge">${walletName(p.walletId)}</span></td>
-      <td><div class="coin-tag"><span class="coin-dot"></span><b>${coinSymbol(p.coinId)}</b>&nbsp;<span style="color:var(--muted);">${coinName(p.coinId)}</span></div></td>
+      <td><div class="coin-tag"><span class="coin-dot"></span><b>${coinSymbol(p.coinId)}</b>&nbsp;<span style="color:var(--muted);">${coinName(p.coinId)}</span>${manual?` <span class="wallet-badge" style="margin-left:4px;">${assetClassLabel(p.coinId)}</span>`:''}</div></td>
       <td class="num ${hc}">${fmtNum(p.qty)}</td>
       <td class="num ${hc}">${fmtEUR(p.avgPrice)}</td>
-      <td class="num">${currentPrice!=null?fmtEUR(currentPrice):'—'}</td>
+      <td class="num">${priceCell}</td>
       <td class="num ${hc}">${value!=null?fmtEUR(value):'—'}</td>
       <td class="num ${hc}">${pl!=null?`<span class="pill ${pl>=0?'gain':'loss'}">${fmtEUR(pl)}</span>`:'—'}</td>
       <td class="num ${hc}">${roi!=null?`<span class="pill ${roi>=0?'gain':'loss'}">${fmtPct(roi)}</span>`:'—'}</td>
@@ -679,6 +736,73 @@ function renderHoldingsTable(rows){
   });
   html += '</tbody></table>';
   document.getElementById('holdingsTableWrap').innerHTML = html;
+}
+
+function editManualPrice(coinId){
+  const current = state.cache.prices[coinId] && state.cache.prices[coinId].price;
+  const input = prompt(`Preço atual de ${coinSymbol(coinId)} (€):`, current!=null?current:'');
+  if(input===null) return;
+  const val = parseFloat(input.replace(',','.'));
+  if(isNaN(val) || val<0){ alert('Valor inválido.'); return; }
+  if(!state.cache.prices[coinId]) state.cache.prices[coinId] = {price:null, change24h:null, ath:null, manual:true};
+  state.cache.prices[coinId].price = val;
+  state.cache.prices[coinId].manual = true;
+  state.cache.prices[coinId].manualUpdated = new Date().toISOString();
+  saveState();
+  renderAll();
+  showToast('Preço atualizado.');
+}
+
+/* ============ POSIÇÃO TOTAL POR ATIVO (soma entre carteiras) ============ */
+function renderAggregateTable(){
+  const pos = computeHoldings();
+  const agg = aggregateByCoin(pos); // {coinId: {coinId, qty, costBasis}}
+  const ids = Object.keys(agg).filter(id=>agg[id].qty>0);
+  const wrap = document.getElementById('aggregateTableWrap');
+  if(!wrap) return;
+  if(ids.length===0){
+    wrap.innerHTML = `<div class="empty-state"><div class="big">Σ</div>Ainda sem posições para agregar.</div>`;
+    return;
+  }
+  const hide = state.settings.hideValues;
+  const hc = hide?'hidden-val':'';
+  // total do portefólio (cripto+ações+ETFs+outros, preço disponível) para calcular o peso %
+  let grandTotal = 0;
+  ids.forEach(id=>{
+    const pr = state.cache.prices[id];
+    if(pr && pr.price!=null) grandTotal += pr.price*agg[id].qty;
+  });
+  let rows = ids.map(id=>{
+    const a = agg[id];
+    const avgPrice = a.qty>0 ? a.costBasis/a.qty : 0;
+    const pr = state.cache.prices[id];
+    const currentPrice = pr?pr.price:null;
+    const value = currentPrice!=null? currentPrice*a.qty : null;
+    const pl = value!=null? value-a.costBasis : null;
+    const roi = a.costBasis>0 && pl!=null ? (pl/a.costBasis*100) : null;
+    const weight = (value!=null && grandTotal>0) ? (value/grandTotal*100) : null;
+    const walletsCount = Object.values(pos).filter(p=>p.coinId===id && p.qty>0).length;
+    return {id, qty:a.qty, avgPrice, currentPrice, value, pl, roi, weight, walletsCount};
+  });
+  rows.sort((a,b)=> (b.value||0) - (a.value||0));
+  let html = `<table><thead><tr>
+    <th>Ativo</th><th class="num">Qtd Total</th><th class="num">Preço Médio</th><th class="num">Preço Atual</th>
+    <th class="num">Valor Total</th><th class="num">Lucro/Prej.</th><th class="num">ROI</th><th class="num">Peso</th>
+  </tr></thead><tbody>`;
+  rows.forEach(r=>{
+    html += `<tr>
+      <td><div class="coin-tag"><span class="coin-dot"></span><b>${coinSymbol(r.id)}</b>&nbsp;<span style="color:var(--muted);">${coinName(r.id)}</span>${r.walletsCount>1?` <span class="wallet-badge">${r.walletsCount} carteiras</span>`:''}</div></td>
+      <td class="num ${hc}">${fmtNum(r.qty)}</td>
+      <td class="num ${hc}">${fmtEUR(r.avgPrice)}</td>
+      <td class="num">${r.currentPrice!=null?fmtEUR(r.currentPrice):'—'}</td>
+      <td class="num ${hc}">${r.value!=null?fmtEUR(r.value):'—'}</td>
+      <td class="num ${hc}">${r.pl!=null?`<span class="pill ${r.pl>=0?'gain':'loss'}">${fmtEUR(r.pl)}</span>`:'—'}</td>
+      <td class="num ${hc}">${r.roi!=null?`<span class="pill ${r.roi>=0?'gain':'loss'}">${fmtPct(r.roi)}</span>`:'—'}</td>
+      <td class="num ${hc}">${r.weight!=null?fmtPct(r.weight).replace('+',''):'—'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
 }
 
 const PALETTE = ['#F0B03C','#6C7BFF','#2FBF8F','#FF5D5D','#39C5F3','#C77DFF','#FF9F6C','#8891AA'];
@@ -790,7 +914,7 @@ function renderTransactionsView(){
     return;
   }
   let html = `<table><thead><tr>
-    <th>Data</th><th>Tipo</th><th>Moeda</th><th>Carteira</th><th class="num">Qtd</th><th class="num">Preço</th><th class="num">Total</th><th></th>
+    <th>Data</th><th>Tipo</th><th>Ativo</th><th>Carteira</th><th class="num">Qtd</th><th class="num">Preço</th><th class="num">Total</th><th></th>
   </tr></thead><tbody>`;
   const typeLabel = {buy:'Compra', sell:'Venda', transfer:'Transferência'};
   sorted.forEach(t=>{
@@ -821,7 +945,7 @@ function deleteTx(id){
 function renderWalletsView(){
   const pos = computeHoldings();
   const grid = document.getElementById('walletsGrid');
-  const typeLabel = {exchange:'Exchange', hardware:'Hardware Wallet', wallet:'Wallet Software', bank:'Conta Bancária'};
+  const typeLabel = {exchange:'Exchange', hardware:'Hardware Wallet', wallet:'Wallet Software', bank:'Conta Bancária', broker:'Corretora'};
   grid.innerHTML = state.wallets.map(w=>{
     const coins = Object.values(pos).filter(p=>p.walletId===w.id && p.qty>0);
     const fiat = (state.fiatBalances||{})[w.id]||0;
@@ -853,14 +977,38 @@ function deleteWallet(id){
 
 /* ============ MODAIS ============ */
 function populateSelects(){
-  const coinSel = document.getElementById('txCoin');
-  coinSel.innerHTML = Object.entries(COIN_CATALOG).map(([id,c])=>`<option value="${id}">${c.symbol} — ${c.name}</option>`).join('');
   const walletOpts = state.wallets.map(w=>`<option value="${w.id}">${w.name}</option>`).join('');
   document.getElementById('txWallet').innerHTML = walletOpts;
   document.getElementById('txWalletTo').innerHTML = walletOpts;
+  populateAssetSelect();
 }
 
+function populateAssetSelect(){
+  const coinSel = document.getElementById('txCoin');
+  const newWrap = document.getElementById('txNewAssetWrap');
+  if(currentAssetClass==='crypto'){
+    coinSel.innerHTML = Object.entries(COIN_CATALOG).map(([id,c])=>`<option value="${id}">${c.symbol} — ${c.name}</option>`).join('');
+    newWrap.style.display = 'none';
+    document.getElementById('showCoinSearch').style.display = 'inline';
+  } else {
+    const existing = Object.entries(state.securities||{}).filter(([id,s])=>s.class===currentAssetClass);
+    let opts = existing.map(([id,s])=>`<option value="${id}">${s.symbol} — ${s.name}</option>`).join('');
+    opts += `<option value="__new__">➕ Novo ativo…</option>`;
+    coinSel.innerHTML = opts;
+    document.getElementById('showCoinSearch').style.display = 'none';
+    document.getElementById('txCoinCustomWrap').style.display = 'none';
+    newWrap.style.display = (existing.length===0 || coinSel.value==='__new__') ? 'block' : 'none';
+  }
+}
+
+document.getElementById('txCoin').addEventListener('change', ()=>{
+  if(currentAssetClass!=='crypto'){
+    document.getElementById('txNewAssetWrap').style.display = document.getElementById('txCoin').value==='__new__' ? 'block' : 'none';
+  }
+});
+
 let currentTxType = 'buy';
+let currentAssetClass = 'crypto';
 function setTxType(type){
   currentTxType = type;
   document.querySelectorAll('#txTypeToggle button').forEach(b=>b.classList.toggle('active', b.dataset.type===type));
@@ -869,10 +1017,20 @@ function setTxType(type){
   document.getElementById('txPriceWrap').style.display = type==='transfer' ? 'none' : 'block';
   document.getElementById('txFeeWrap').style.display = type==='transfer' ? 'none' : 'block';
 }
+function setAssetClass(cls){
+  currentAssetClass = cls;
+  document.querySelectorAll('#txClassToggle button').forEach(b=>b.classList.toggle('active', b.dataset.class===cls));
+  document.getElementById('txAssetLabel').textContent = cls==='crypto' ? 'Moeda' : 'Ativo';
+  populateAssetSelect();
+}
 
 document.getElementById('txTypeToggle').addEventListener('click', e=>{
   const btn = e.target.closest('button'); if(!btn) return;
   setTxType(btn.dataset.type);
+});
+document.getElementById('txClassToggle').addEventListener('click', e=>{
+  const btn = e.target.closest('button'); if(!btn) return;
+  setAssetClass(btn.dataset.class);
 });
 
 document.getElementById('showCoinSearch').addEventListener('click', e=>{
@@ -915,6 +1073,7 @@ document.querySelectorAll('.modal-overlay').forEach(ov=>{
 });
 
 function openTxModal(){
+  setAssetClass('crypto');
   populateSelects();
   setTxType('buy');
   document.getElementById('txQty').value='';
@@ -923,13 +1082,15 @@ function openTxModal(){
   document.getElementById('txNotes').value='';
   document.getElementById('txDate').value = new Date().toISOString().slice(0,10);
   document.getElementById('txCoinCustomWrap').style.display='none';
+  document.getElementById('txNewAssetSymbol').value='';
+  document.getElementById('txNewAssetName').value='';
   openModal('txModal');
 }
 document.getElementById('addTxBtn').addEventListener('click', openTxModal);
 document.getElementById('addTxBtn2').addEventListener('click', openTxModal);
 
 document.getElementById('txSubmit').addEventListener('click', ()=>{
-  const coinId = document.getElementById('txCoin').value;
+  let coinId = document.getElementById('txCoin').value;
   const walletId = document.getElementById('txWallet').value;
   const walletTo = document.getElementById('txWalletTo').value;
   const qty = parseFloat(document.getElementById('txQty').value);
@@ -938,6 +1099,19 @@ document.getElementById('txSubmit').addEventListener('click', ()=>{
   const date = document.getElementById('txDate').value || new Date().toISOString().slice(0,10);
   const notes = document.getElementById('txNotes').value;
 
+  // Ação/ETF/Outro: criar o ativo novo, se for o caso
+  if(currentAssetClass!=='crypto'){
+    if(coinId==='__new__' || !coinId){
+      const symbol = document.getElementById('txNewAssetSymbol').value.trim().toUpperCase();
+      const name = document.getElementById('txNewAssetName').value.trim();
+      if(!symbol){ alert('Indica o símbolo do ativo (ex: AAPL).'); return; }
+      const newId = 'sec_' + symbol.toLowerCase().replace(/[^a-z0-9]/g,'');
+      if(!state.securities) state.securities = {};
+      if(!state.securities[newId]) state.securities[newId] = {symbol, name: name||symbol, class: currentAssetClass};
+      coinId = newId;
+    }
+  }
+
   if(!qty || qty<=0){ alert('Indica uma quantidade válida.'); return; }
   if(currentTxType!=='transfer' && (!price || price<=0)){ alert('Indica o preço por unidade.'); return; }
   if(currentTxType==='transfer' && walletTo===walletId){ alert('Escolhe carteiras diferentes para a transferência.'); return; }
@@ -945,10 +1119,18 @@ document.getElementById('txSubmit').addEventListener('click', ()=>{
   const newTx = {id:'tx_'+Math.random().toString(36).slice(2,10), type:currentTxType, walletId, coinId, qty, price, fee, date, notes};
   if(currentTxType==='transfer') newTx.walletTo = walletTo;
   state.transactions.push(newTx);
+
+  // Ativos sem cotação automática: usamos o preço da transação como ponto de partida manual
+  if(!isCrypto(coinId) && currentTxType!=='transfer'){
+    if(!state.cache.prices[coinId] || state.cache.prices[coinId].price==null){
+      state.cache.prices[coinId] = {price, change24h:null, ath:null, manual:true, manualUpdated:new Date().toISOString()};
+    }
+  }
+
   saveState();
   closeModal('txModal');
   renderAll();
-  fetchPrices([coinId]).then(renderAll);
+  if(isCrypto(coinId)) fetchPrices([coinId]).then(renderAll);
   showToast('Transação guardada.');
 });
 
@@ -993,7 +1175,7 @@ document.getElementById('trendReload').addEventListener('click', ()=> refreshAll
 
 /* Backup */
 document.getElementById('exportBtn').addEventListener('click', async ()=>{
-  const filename = `mycrypto-backup-${new Date().toISOString().slice(0,10)}.json`;
+  const filename = `myportefolio-backup-${new Date().toISOString().slice(0,10)}.json`;
   const content = JSON.stringify(state,null,2);
   // Chrome/Edge desktop: permite escolher a pasta/nome do ficheiro
   if(window.showSaveFilePicker){
@@ -1042,7 +1224,13 @@ document.getElementById('importFile').addEventListener('change', (e)=>{
 async function refreshAll(){
   const pos = computeHoldings();
   const ids = [...new Set(Object.values(pos).filter(p=>p.qty>0).map(p=>p.coinId))];
-  await fetchPrices(ids);
+  const cryptoIds = ids.filter(isCrypto);
+  // Ações/ETFs/Outros não têm cotação automática (sem API fiável sem chave/backend);
+  // o preço é mantido manualmente — garantimos só que existe uma entrada inicial.
+  ids.filter(id=>!isCrypto(id)).forEach(id=>{
+    if(!state.cache.prices[id]) state.cache.prices[id] = {price:null, change24h:null, ath:null, manual:true};
+  });
+  await fetchPrices(cryptoIds);
   await fetchDominance();
   await fetchTop50();
   renderAll();
