@@ -206,6 +206,10 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
 </header>
 
 <div class="ticker-wrap"><div class="ticker" id="tickerStrip"></div></div>
+<div class="ticker-wrap" id="stockTickerWrap" style="border-top:1px solid var(--line);">
+  <div class="ticker" id="stockTickerStrip"></div>
+  <span class="small-btn" onclick="setFinnhubKey()" title="Configurar a chave das cotações de ações NY" style="position:absolute;right:8px;top:6px;z-index:3;cursor:pointer;">⚙ NY</span>
+</div>
 
 <main>
 
@@ -334,9 +338,13 @@ td.num,th.num{text-align:right;font-family:'JetBrains Mono',monospace;}
       <label>Para a carteira</label>
       <select id="txWalletTo"></select>
     </div>
-    <div class="field">
+    <div class="field" id="txQtyWrap">
       <label>Quantidade</label>
       <input type="number" step="any" id="txQty" placeholder="0.00">
+    </div>
+    <div class="field" id="txAmountWrap" style="display:none;">
+      <label id="txAmountLabel">Valor depositado (€)</label>
+      <input type="number" step="any" id="txAmount" placeholder="0.00">
     </div>
     <div class="field" id="txPriceWrap">
       <label>Preço por unidade (€)</label>
@@ -460,6 +468,32 @@ function migrateState(s){
   if(!s.wallets.some(w=>w.name.toUpperCase()==='XTB')){
     s.wallets.push({id:'w_xtb', name:'XTB', type:'broker'});
   }
+  // Planos ("Outros"): passam a funcionar por valor depositado (qty = € depositados, preço = 1).
+  // O valor atual do plano é o que for atualizado manualmente.
+  if(!s.migrations) s.migrations = {};
+  if(!s.migrations.plansV1){
+    const net = {};
+    s.transactions.forEach(t=>{
+      const sec = s.securities[t.coinId];
+      if(!sec || sec.class!=='other') return;
+      if(t.type==='buy') net[t.coinId] = (net[t.coinId]||0) + Number(t.qty||0);
+      if(t.type==='sell') net[t.coinId] = (net[t.coinId]||0) - Number(t.qty||0);
+    });
+    Object.keys(net).forEach(id=>{
+      const pr = s.cache.prices && s.cache.prices[id];
+      if(pr && pr.price!=null) pr.totalValue = pr.price * net[id];
+    });
+    s.transactions.forEach(t=>{
+      const sec = s.securities[t.coinId];
+      if(!sec || sec.class!=='other') return;
+      if(t.type==='buy' || t.type==='sell'){
+        t.qty = Number(t.qty||0) * Number(t.price||0);
+        t.price = 1;
+        t.fee = 0;
+      }
+    });
+    s.migrations.plansV1 = true;
+  }
   return s;
 }
 function saveState(){
@@ -567,6 +601,74 @@ async function fetchTop50(){
   }
 }
 
+/* ============ AÇÕES NY (Finnhub) ============ */
+const NY_STOCKS = ['AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','BRK.B','AVGO','JPM','LLY','V','XOM','UNH','WMT','MA','COST','JNJ','PG','HD'];
+const FH_KEY_STORAGE = 'myportefolio_finnhub_key'; // fora do estado, para não ir nos backups
+function getFinnhubKey(){ try{ return localStorage.getItem(FH_KEY_STORAGE)||''; }catch(e){ return ''; } }
+function setFinnhubKey(){
+  const current = getFinnhubKey();
+  const input = prompt('Chave gratuita do Finnhub (finnhub.io → Sign up → API key).\nDeixa vazio para desativar as cotações de ações NY.', current);
+  if(input===null) return;
+  localStorage.setItem(FH_KEY_STORAGE, input.trim());
+  state.cache.stocks = null;
+  state.cache.stocksUpdated = null;
+  renderStockTicker();
+  if(input.trim()) fetchStocks(true);
+}
+let lastStocksFetch = 0;
+async function fetchStocks(force){
+  const key = getFinnhubKey();
+  if(!key) return;
+  if(!force && Date.now()-lastStocksFetch < 30000) return; // respeita o limite de 60 pedidos/min
+  lastStocksFetch = Date.now();
+  let failed = 0, authError = false;
+  const results = await Promise.all(NY_STOCKS.map(async sym=>{
+    try{
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${encodeURIComponent(key)}`, {cache:'no-store'});
+      if(res.status===401 || res.status===403){ authError = true; failed++; return null; }
+      if(!res.ok){ failed++; return null; }
+      const d = await res.json();
+      if(!d || !d.c) { failed++; return null; }
+      return {symbol:sym, price:d.c, change:(d.dp!=null?d.dp:null)};
+    }catch(e){ failed++; return null; }
+  }));
+  const list = results.filter(Boolean);
+  if(list.length>0){
+    state.cache.stocks = list;
+    state.cache.stocksUpdated = new Date().toISOString();
+    saveState();
+  } else if(authError){
+    showToast('Chave do Finnhub inválida — verifica em ⚙ NY.');
+  } else {
+    showToast('Não foi possível obter as cotações de ações NY.');
+  }
+  renderStockTicker();
+}
+function renderStockTicker(){
+  const wrap = document.getElementById('stockTickerStrip');
+  if(!wrap) return;
+  const key = getFinnhubKey();
+  if(!key){
+    wrap.style.animation = 'none';
+    wrap.innerHTML = `<span class="ticker-item" style="cursor:pointer;color:var(--muted);" onclick="setFinnhubKey()">Ações NY: clica aqui para configurar a chave gratuita do Finnhub e ver as cotações em tempo real</span>`;
+    return;
+  }
+  const list = state.cache.stocks;
+  if(!list || list.length===0){
+    wrap.style.animation = 'none';
+    wrap.innerHTML = `<span class="ticker-item" style="color:var(--muted);">Ações NY: a carregar…</span>`;
+    return;
+  }
+  const usd = v=> v.toLocaleString('en-US',{style:'currency',currency:'USD'});
+  const items = list.map(c=>{
+    const chg = c.change;
+    const cls = chg==null ? '' : (chg>=0?'up':'down');
+    return `<span class="ticker-item"><span class="sym">${c.symbol}</span><span class="mono">${usd(c.price)}</span><span class="chg ${cls}">${chg==null?'':fmtPct(chg)}</span></span>`;
+  });
+  wrap.innerHTML = items.join('') + items.join('');
+  wrap.style.animation = 'scroll-ticker 60s linear infinite';
+}
+
 async function fetchDominance(){
   try{
     const res = await fetch(`${CG}/global?_ts=${Date.now()}`, {cache:'no-store'});
@@ -625,6 +727,19 @@ function assetClassLabel(id){
   return s.class==='stock'?'Ação':s.class==='etf'?'ETF':'Outro';
 }
 function walletName(id){ const w = state.wallets.find(w=>w.id===id); return w?w.name:'—'; }
+function isPlan(id){ return !!(state.securities && state.securities[id] && state.securities[id].class==='other'); }
+// Planos: preço por unidade = valor atual do plano / total depositado (só serve para a conta bater certo nas tabelas)
+function syncPlanPrices(){
+  const agg = aggregateByCoin(computeHoldings());
+  Object.keys(agg).forEach(id=>{
+    if(!isPlan(id)) return;
+    if(!state.cache.prices[id]) state.cache.prices[id] = {price:null, change24h:null, ath:null, manual:true};
+    const pr = state.cache.prices[id];
+    const deposited = agg[id].qty;
+    const total = (pr.totalValue!=null) ? pr.totalValue : deposited;
+    pr.price = deposited>0 ? total/deposited : 1;
+  });
+}
 function showToast(msg){
   const t = document.getElementById('toast');
   t.textContent = msg; t.style.display='block';
@@ -634,6 +749,7 @@ function showToast(msg){
 
 /* ============ RENDER: TICKER ============ */
 function renderTicker(){
+  renderStockTicker();
   const wrap = document.getElementById('tickerStrip');
   const list = state.cache.top50;
   if(!list || list.length===0){ wrap.innerHTML=''; return; }
@@ -649,6 +765,7 @@ function renderTicker(){
 let coinPieChart, walletPieChart, domChartObj, myDomChartObj, trendChartObj;
 
 function renderDashboard(){
+  syncPlanPrices();
   const pos = computeHoldings();
   const rows = Object.values(pos).filter(p=>p.qty>0);
 
@@ -719,14 +836,17 @@ function renderHoldingsTable(rows){
     const roi = p.costBasis>0 && pl!=null ? (pl/p.costBasis*100) : null;
     const ath = pr?pr.ath:null;
     const manual = !isCrypto(p.coinId);
-    const priceCell = manual
+    const plan = isPlan(p.coinId);
+    const priceCell = plan
+      ? `<span class="small-btn" style="cursor:pointer;" onclick="editPlanValue('${p.coinId}')" title="Clicar para atualizar o valor do plano">atualizar valor ✎</span>`
+      : manual
       ? `<span class="small-btn" style="cursor:pointer;" onclick="editManualPrice('${p.coinId}')" title="Clicar para atualizar o preço manualmente">${currentPrice!=null?fmtEUR(currentPrice):'definir'} ✎</span>`
       : (currentPrice!=null?fmtEUR(currentPrice):'—');
     html += `<tr>
       <td><span class="wallet-badge">${walletName(p.walletId)}</span></td>
       <td><div class="coin-tag"><span class="coin-dot"></span><b>${coinSymbol(p.coinId)}</b>&nbsp;<span style="color:var(--muted);">${coinName(p.coinId)}</span>${manual?` <span class="wallet-badge" style="margin-left:4px;">${assetClassLabel(p.coinId)}</span>`:''}</div></td>
-      <td class="num ${hc}">${fmtNum(p.qty)}</td>
-      <td class="num ${hc}">${fmtEUR(p.avgPrice)}</td>
+      <td class="num ${hc}">${plan?fmtEUR(p.qty)+' dep.':fmtNum(p.qty)}</td>
+      <td class="num ${hc}">${plan?'—':fmtEUR(p.avgPrice)}</td>
       <td class="num">${priceCell}</td>
       <td class="num ${hc}">${value!=null?fmtEUR(value):'—'}</td>
       <td class="num ${hc}">${pl!=null?`<span class="pill ${pl>=0?'gain':'loss'}">${fmtEUR(pl)}</span>`:'—'}</td>
@@ -738,7 +858,25 @@ function renderHoldingsTable(rows){
   document.getElementById('holdingsTableWrap').innerHTML = html;
 }
 
+function editPlanValue(coinId){
+  const agg = aggregateByCoin(computeHoldings());
+  const deposited = agg[coinId] ? agg[coinId].qty : 0;
+  const pr = state.cache.prices[coinId];
+  const current = (pr && pr.totalValue!=null) ? pr.totalValue : deposited;
+  const input = prompt(`Valor atual do plano ${coinSymbol(coinId)} (€) — total depositado: ${deposited.toFixed(2)} €`, current);
+  if(input===null) return;
+  const val = parseFloat(String(input).replace(',','.'));
+  if(isNaN(val) || val<0){ alert('Valor inválido.'); return; }
+  if(!state.cache.prices[coinId]) state.cache.prices[coinId] = {price:null, change24h:null, ath:null, manual:true};
+  state.cache.prices[coinId].totalValue = val;
+  state.cache.prices[coinId].manualUpdated = new Date().toISOString();
+  saveState();
+  renderAll();
+  showToast('Valor do plano atualizado.');
+}
+
 function editManualPrice(coinId){
+  if(isPlan(coinId)){ editPlanValue(coinId); return; }
   const current = state.cache.prices[coinId] && state.cache.prices[coinId].price;
   const input = prompt(`Preço atual de ${coinSymbol(coinId)} (€):`, current!=null?current:'');
   if(input===null) return;
@@ -790,11 +928,12 @@ function renderAggregateTable(){
     <th class="num">Valor Total</th><th class="num">Lucro/Prej.</th><th class="num">ROI</th><th class="num">Peso</th>
   </tr></thead><tbody>`;
   rows.forEach(r=>{
+    const plan = isPlan(r.id);
     html += `<tr>
-      <td><div class="coin-tag"><span class="coin-dot"></span><b>${coinSymbol(r.id)}</b>&nbsp;<span style="color:var(--muted);">${coinName(r.id)}</span>${r.walletsCount>1?` <span class="wallet-badge">${r.walletsCount} carteiras</span>`:''}</div></td>
-      <td class="num ${hc}">${fmtNum(r.qty)}</td>
-      <td class="num ${hc}">${fmtEUR(r.avgPrice)}</td>
-      <td class="num">${r.currentPrice!=null?fmtEUR(r.currentPrice):'—'}</td>
+      <td><div class="coin-tag"><span class="coin-dot"></span><b>${coinSymbol(r.id)}</b>&nbsp;<span style="color:var(--muted);">${coinName(r.id)}</span>${r.walletsCount>1?` <span class="wallet-badge">${r.walletsCount} carteiras</span>`:''}${plan?' <span class="wallet-badge">Plano</span>':''}</div></td>
+      <td class="num ${hc}">${plan?fmtEUR(r.qty)+' dep.':fmtNum(r.qty)}</td>
+      <td class="num ${hc}">${plan?'—':fmtEUR(r.avgPrice)}</td>
+      <td class="num">${plan?`<span class="small-btn" style="cursor:pointer;" onclick="editPlanValue('${r.id}')" title="Clicar para atualizar o valor do plano">atualizar valor ✎</span>`:(r.currentPrice!=null?fmtEUR(r.currentPrice):'—')}</td>
       <td class="num ${hc}">${r.value!=null?fmtEUR(r.value):'—'}</td>
       <td class="num ${hc}">${r.pl!=null?`<span class="pill ${r.pl>=0?'gain':'loss'}">${fmtEUR(r.pl)}</span>`:'—'}</td>
       <td class="num ${hc}">${r.roi!=null?`<span class="pill ${r.roi>=0?'gain':'loss'}">${fmtPct(r.roi)}</span>`:'—'}</td>
@@ -918,15 +1057,16 @@ function renderTransactionsView(){
   </tr></thead><tbody>`;
   const typeLabel = {buy:'Compra', sell:'Venda', transfer:'Transferência'};
   sorted.forEach(t=>{
+    const planTx = isPlan(t.coinId) && t.type!=='transfer';
     const total = (Number(t.qty)||0) * (Number(t.price)||0);
     const walletTxt = t.type==='transfer' ? `${walletName(t.walletId)} → ${walletName(t.walletTo)}` : walletName(t.walletId);
     html += `<tr>
       <td class="mono">${t.date}</td>
-      <td>${typeLabel[t.type]}</td>
+      <td>${planTx ? (t.type==='buy'?'Depósito':'Levantamento') : typeLabel[t.type]}</td>
       <td>${coinSymbol(t.coinId)}</td>
       <td>${walletTxt}</td>
-      <td class="num">${fmtNum(t.qty)}</td>
-      <td class="num">${t.type==='transfer'?'—':fmtEUR(t.price)}</td>
+      <td class="num">${planTx?'—':fmtNum(t.qty)}</td>
+      <td class="num">${(t.type==='transfer'||planTx)?'—':fmtEUR(t.price)}</td>
       <td class="num">${t.type==='transfer'?'—':fmtEUR(total)}</td>
       <td><span class="small-btn" onclick="deleteTx('${t.id}')">Apagar</span></td>
     </tr>`;
@@ -1014,14 +1154,30 @@ function setTxType(type){
   document.querySelectorAll('#txTypeToggle button').forEach(b=>b.classList.toggle('active', b.dataset.type===type));
   document.getElementById('txWalletToWrap').style.display = type==='transfer' ? 'block' : 'none';
   document.getElementById('txWalletLabel').textContent = type==='transfer' ? 'De (carteira)' : 'Carteira';
-  document.getElementById('txPriceWrap').style.display = type==='transfer' ? 'none' : 'block';
-  document.getElementById('txFeeWrap').style.display = type==='transfer' ? 'none' : 'block';
+  updateTxFields();
+}
+function updateTxFields(){
+  const other = currentAssetClass==='other';
+  const transfer = currentTxType==='transfer';
+  document.getElementById('txQtyWrap').style.display = other ? 'none' : 'block';
+  document.getElementById('txPriceWrap').style.display = (other||transfer) ? 'none' : 'block';
+  document.getElementById('txFeeWrap').style.display = (other||transfer) ? 'none' : 'block';
+  document.getElementById('txAmountWrap').style.display = other ? 'block' : 'none';
+  document.getElementById('txAmountLabel').textContent = currentTxType==='sell' ? 'Valor levantado (€)' : 'Valor depositado (€)';
+  const btns = document.querySelectorAll('#txTypeToggle button');
+  btns.forEach(b=>{
+    if(b.dataset.type==='buy') b.textContent = other ? 'Depósito' : 'Compra';
+    if(b.dataset.type==='sell') b.textContent = other ? 'Levantamento' : 'Venda';
+    if(b.dataset.type==='transfer') b.style.display = other ? 'none' : '';
+  });
 }
 function setAssetClass(cls){
   currentAssetClass = cls;
   document.querySelectorAll('#txClassToggle button').forEach(b=>b.classList.toggle('active', b.dataset.class===cls));
-  document.getElementById('txAssetLabel').textContent = cls==='crypto' ? 'Moeda' : 'Ativo';
+  document.getElementById('txAssetLabel').textContent = cls==='crypto' ? 'Moeda' : (cls==='other' ? 'Plano / produto' : 'Ativo');
+  if(cls==='other' && currentTxType==='transfer') setTxType('buy');
   populateAssetSelect();
+  updateTxFields();
 }
 
 document.getElementById('txTypeToggle').addEventListener('click', e=>{
@@ -1077,6 +1233,7 @@ function openTxModal(){
   populateSelects();
   setTxType('buy');
   document.getElementById('txQty').value='';
+  document.getElementById('txAmount').value='';
   document.getElementById('txPrice').value='';
   document.getElementById('txFee').value='';
   document.getElementById('txNotes').value='';
@@ -1093,9 +1250,14 @@ document.getElementById('txSubmit').addEventListener('click', ()=>{
   let coinId = document.getElementById('txCoin').value;
   const walletId = document.getElementById('txWallet').value;
   const walletTo = document.getElementById('txWalletTo').value;
-  const qty = parseFloat(document.getElementById('txQty').value);
-  const price = parseFloat(document.getElementById('txPrice').value)||0;
-  const fee = parseFloat(document.getElementById('txFee').value)||0;
+  const planMode = currentAssetClass==='other';
+  let qty = parseFloat(document.getElementById('txQty').value);
+  let price = parseFloat(document.getElementById('txPrice').value)||0;
+  let fee = parseFloat(document.getElementById('txFee').value)||0;
+  if(planMode){
+    qty = parseFloat(document.getElementById('txAmount').value);
+    price = 1; fee = 0;
+  }
   const date = document.getElementById('txDate').value || new Date().toISOString().slice(0,10);
   const notes = document.getElementById('txNotes').value;
 
@@ -1112,16 +1274,26 @@ document.getElementById('txSubmit').addEventListener('click', ()=>{
     }
   }
 
-  if(!qty || qty<=0){ alert('Indica uma quantidade válida.'); return; }
-  if(currentTxType!=='transfer' && (!price || price<=0)){ alert('Indica o preço por unidade.'); return; }
+  if(!qty || qty<=0){ alert(planMode ? 'Indica o valor (€).' : 'Indica uma quantidade válida.'); return; }
+  if(!planMode && currentTxType!=='transfer' && (!price || price<=0)){ alert('Indica o preço por unidade.'); return; }
   if(currentTxType==='transfer' && walletTo===walletId){ alert('Escolhe carteiras diferentes para a transferência.'); return; }
+
+  // Planos: o valor atual (manual) acompanha os depósitos/levantamentos
+  if(planMode){
+    const before = aggregateByCoin(computeHoldings())[coinId];
+    const deposited = before ? before.qty : 0;
+    if(!state.cache.prices[coinId]) state.cache.prices[coinId] = {price:null, change24h:null, ath:null, manual:true};
+    const pr = state.cache.prices[coinId];
+    const currentTotal = (pr.totalValue!=null) ? pr.totalValue : deposited;
+    pr.totalValue = currentTxType==='sell' ? Math.max(0, currentTotal - qty) : currentTotal + qty;
+  }
 
   const newTx = {id:'tx_'+Math.random().toString(36).slice(2,10), type:currentTxType, walletId, coinId, qty, price, fee, date, notes};
   if(currentTxType==='transfer') newTx.walletTo = walletTo;
   state.transactions.push(newTx);
 
   // Ativos sem cotação automática: usamos o preço da transação como ponto de partida manual
-  if(!isCrypto(coinId) && currentTxType!=='transfer'){
+  if(!planMode && !isCrypto(coinId) && currentTxType!=='transfer'){
     if(!state.cache.prices[coinId] || state.cache.prices[coinId].price==null){
       state.cache.prices[coinId] = {price, change24h:null, ath:null, manual:true, manualUpdated:new Date().toISOString()};
     }
@@ -1234,6 +1406,7 @@ async function refreshAll(){
   await fetchDominance();
   await fetchTop50();
   renderAll();
+  fetchStocks(false);
 }
 function renderAll(){
   renderDashboard();
